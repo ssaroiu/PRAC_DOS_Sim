@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <ProjectGuid>{8F4B2C3E-6A3D-4A9B-8FB9-123456789ABC}</ProjectGuid>
+    <ProjectHome>.</ProjectHome>
+    <StartupFile>dram_sim.py</StartupFile>
+    <SearchPath></SearchPath>
+    <WorkingDirectory>.</WorkingDirectory>
+    <OutputPath>.</OutputPath>
+    <Name>DRAMSimVS</Name>
+    <InterpreterId>Global|PythonCore|3.11</InterpreterId>
+    <LaunchProvider>Standard Python</LaunchProvider>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
+    <CommandLineArguments>--rows 32768 --trc 45ns --threshold 16000 --alert 64ms</CommandLineArguments>
+    <EnableNativeCodeDebugging>False</EnableNativeCodeDebugging>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <CommandLineArguments>--rows 8 --trc 10us --threshold 3 --alert 100us --runtime 128ms</CommandLineArguments>
+    <EnableNativeCodeDebugging>False</EnableNativeCodeDebugging>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="dram_sim.py" />
+  </ItemGroup>
+  <Import Project="$(MSBuildExtensionsPath)\Microsoft\VisualStudio\v$(VisualStudioVersion)\Python Tools\Microsoft.PythonTools.targets" />
+</Project>

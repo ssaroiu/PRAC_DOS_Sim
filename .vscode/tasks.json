@@ -1,0 +1,24 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run DRAM Simulator (Debug)",
+			"type": "shell",
+			"command": "python",
+			"args": [
+				"dram_sim.py",
+				"--rows",
+				"32768",
+				"--trc",
+				"45ns",
+				"--threshold",
+				"16000",
+				"--alert",
+				"64ms"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		}
+	]
+}
