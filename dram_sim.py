@@ -16,7 +16,10 @@ Inputs:
 - --rows           Number of rows to operate on.
 - --trc            tRC per ACTIVATE (e.g., '45ns', '3.2us', '64ms', '0.001s').
 - --threshold      Counter threshold; ALERT raised when counter > threshold.
-- --alert          ALERT duration (e.g., '64ms', '200us', '0.001s'); '0' disables alert stalls.
+- --rfmabo         Number of RFMs issued in response to ABO.
+- --rfmfreqmin     RFM window start time (e.g., '32us', '64us'). Use '0' to disable RFM.
+- --rfmfreqmax     RFM window end time (e.g., '48us', '80us'). Must be >= rfmfreqmin. Use '0' to disable RFM.
+- --trfcrfm        tRFC RFM time duration consumed when RFM is issued (e.g., '100ns', '1us'). Use '0' for no time consumption.
 - --runtime        Total simulation runtime (default 128 ms).
 
 Notes:
@@ -27,6 +30,7 @@ Notes:
 
 import argparse
 import sys
+import random
 from typing import List
 
 
@@ -83,8 +87,15 @@ class DRAMSimulator:
         threshold: int,
         rfmabo: int,
         runtime_s: float = 0.128,
-        rfm_freq_s: float = 0.0,
+        rfm_freq_min_s: float = 0.0,
+        rfm_freq_max_s: float = 0.0,
         trfcrfm_s: float = 0.0,
+        # Original string arguments for CSV output
+        trc_str: str = "",
+        rfmfreqmin_str: str = "",
+        rfmfreqmax_str: str = "",
+        trfcrfm_str: str = "",
+        runtime_str: str = "",
     ):
         # Validate inputs
         if rows <= 0:
@@ -97,8 +108,12 @@ class DRAMSimulator:
             raise ValueError("rfmabo must be >= 0")
         if runtime_s <= 0:
             raise ValueError("runtime must be > 0")
-        if rfm_freq_s < 0:
-            raise ValueError("RFM frequency must be >= 0")
+        if rfm_freq_min_s < 0:
+            raise ValueError("RFM frequency min must be >= 0")
+        if rfm_freq_max_s < 0:
+            raise ValueError("RFM frequency max must be >= 0")
+        if rfm_freq_min_s > 0 and rfm_freq_max_s > 0 and rfm_freq_max_s < rfm_freq_min_s:
+            raise ValueError("RFM frequency max must be >= RFM frequency min")
         if trfcrfm_s < 0:
             raise ValueError("tRFC RFM time must be >= 0")
 
@@ -109,8 +124,16 @@ class DRAMSimulator:
         self.rfmabo = rfmabo
         self.alert_duration_s = rfmabo * trfcrfm_s  # Calculate alert duration
         self.runtime_s = runtime_s
-        self.rfm_freq_s = rfm_freq_s
+        self.rfm_freq_min_s = rfm_freq_min_s
+        self.rfm_freq_max_s = rfm_freq_max_s
         self.trfcrfm_s = trfcrfm_s
+        
+        # Store original string arguments for CSV output
+        self.trc_str = trc_str
+        self.rfmfreqmin_str = rfmfreqmin_str
+        self.rfmfreqmax_str = rfmfreqmax_str
+        self.trfcrfm_str = trfcrfm_str
+        self.runtime_str = runtime_str
 
         # State
         self.time_s: float = 0.0
@@ -121,11 +144,33 @@ class DRAMSimulator:
         self.total_alert_time_s: List[float] = [0.0] * rows
         self.total_activations: int = 0
         
-        # RFM state
-        self.next_rfm_time_s: float = rfm_freq_s if rfm_freq_s > 0 else float('inf')
+        # RFM state - windowed approach
+        self.rfm_enabled = rfm_freq_min_s > 0 and rfm_freq_max_s > 0
+        if self.rfm_enabled:
+            self.next_rfm_window_start_s: float = rfm_freq_min_s
+            self.next_rfm_window_end_s: float = rfm_freq_max_s
+            self._schedule_next_rfm_in_window()  # Schedule first RFM within the first window
+        else:
+            self.next_rfm_window_start_s: float = float('inf')
+            self.next_rfm_window_end_s: float = float('inf')
+            self.next_rfm_time_s: float = float('inf')
         self.rfm_issued: List[int] = [0] * rows  # Track RFMs issued per row
         self.total_rfms: int = 0
         self.total_rfm_time_s: float = 0.0
+
+    def _schedule_next_rfm_in_window(self):
+        """Schedule the next RFM at a random time within the current window."""
+        if self.rfm_enabled:
+            window_duration = self.next_rfm_window_end_s - self.next_rfm_window_start_s
+            if window_duration > 0:
+                # Random time within the window
+                random_offset = random.uniform(0, window_duration)
+                self.next_rfm_time_s = self.next_rfm_window_start_s + random_offset
+            else:
+                # No window duration, schedule at window start
+                self.next_rfm_time_s = self.next_rfm_window_start_s
+        else:
+            self.next_rfm_time_s = float('inf')
 
     def run(self):
         """
@@ -136,8 +181,17 @@ class DRAMSimulator:
         """
         while True:
             # Check if it's time for RFM before next activation
-            if self.time_s >= self.next_rfm_time_s and self.rfm_freq_s > 0:
-                self._issue_rfm()
+            if self.time_s >= self.next_rfm_time_s and self.rfm_enabled:
+                # Check if we're still within the window
+                if self.time_s <= self.next_rfm_window_end_s:
+                    self._issue_rfm()
+                
+                # Check if window has expired, schedule next window
+                if self.time_s >= self.next_rfm_window_end_s:
+                    # Move to next window
+                    self.next_rfm_window_start_s += self.rfm_freq_min_s
+                    self.next_rfm_window_end_s = self.next_rfm_window_start_s + (self.rfm_freq_max_s - self.rfm_freq_min_s)
+                    self._schedule_next_rfm_in_window()
                 
             # Can we start an ACTIVATE within the runtime?
             if self.time_s + self.trc_s > self.runtime_s:
@@ -200,8 +254,7 @@ class DRAMSimulator:
                     self.total_rfm_time_s += consume
                     self.time_s += consume
         
-        # Schedule next RFM
-        self.next_rfm_time_s += self.rfm_freq_s
+        # Note: Next RFM is scheduled in the run loop when window expires
 
     def summary(self) -> str:
         """Build a human-readable summary of the simulation results."""
@@ -225,22 +278,25 @@ class DRAMSimulator:
         lines.append(f"Used time:          {human_time(used_time)}")
         lines.append(f"Idle time:          {human_time(idle_time)}")
         lines.append(f"Total alert time:   {human_time(total_alert)}")
-        if self.rfm_freq_s > 0:
-            lines.append(f"RFM frequency:      {human_time(self.rfm_freq_s)}")
+        if self.rfm_enabled:
+            window_duration = self.rfm_freq_max_s - self.rfm_freq_min_s
+            lines.append(f"RFM window start:   {human_time(self.rfm_freq_min_s)}")
+            lines.append(f"RFM window end:     {human_time(self.rfm_freq_max_s)}")
+            lines.append(f"RFM window duration:{human_time(window_duration)}")
             lines.append(f"Total RFMs issued:  {self.total_rfms}")
             if self.trfcrfm_s > 0:
                 lines.append(f"tRFC RFM time:      {human_time(self.trfcrfm_s)}")
                 lines.append(f"Total RFM time:     {human_time(self.total_rfm_time_s)}")
         lines.append("")
         lines.append("Per-row metrics:")
-        if self.rfm_freq_s > 0:
+        if self.rfm_enabled:
             lines.append(f"{'Row':>6} | {'Activations':>12} | {'Alerts':>6} | {'RFMs':>6} | {'Alert Time':>12}")
             lines.append("-" * 58)
         else:
             lines.append(f"{'Row':>6} | {'Activations':>12} | {'Alerts':>6} | {'Alert Time':>12}")
             lines.append("-" * 46)
         for r in range(self.rows):
-            if self.rfm_freq_s > 0:
+            if self.rfm_enabled:
                 lines.append(
                     f"{r:6d} | {self.total_activations_per_row[r]:12d} | {self.alerts_issued[r]:6d} | {self.rfm_issued[r]:6d} | {human_time(self.total_alert_time_s[r]):>12}"
                 )
@@ -251,18 +307,28 @@ class DRAMSimulator:
         return "\n".join(lines)
 
     def csv_output(self) -> str:
-        """Output metrics in CSV format: Row,Activations,Alerts,RFMs,AlertTime"""
-        lines = []
-        for r in range(self.rows):
-            if self.rfm_freq_s > 0:
-                lines.append(
-                    f"{r},{self.total_activations_per_row[r]},{self.alerts_issued[r]},{self.rfm_issued[r]},{self.total_alert_time_s[r] / 1e6}"
-                )
+        """Output metrics in CSV format: rows,trc,threshold,rfmabo,rfmfreqmin,rfmfreqmax,trfcrfm,runtime,Row,Activations,Alerts,RFMs,AlertTime"""
+        # Input parameters first
+        input_params = f"{self.rows},{self.trc_str},{self.threshold},{self.rfmabo},{self.rfmfreqmin_str},{self.rfmfreqmax_str},{self.trfcrfm_str},{self.runtime_str}"
+        
+        if self.rows == 1:
+            # Single row - output as before with row number
+            if self.rfm_enabled:
+                metrics = f"0,{self.total_activations_per_row[0]},{self.alerts_issued[0]},{self.rfm_issued[0]},{self.total_alert_time_s[0] / 1e6}"
             else:
-                lines.append(
-                    f"{r},{self.total_activations_per_row[r]},{self.alerts_issued[r]},0,{self.total_alert_time_s[r] / 1e6}"
-                )
-        return "\n".join(lines)
+                metrics = f"0,{self.total_activations_per_row[0]},{self.alerts_issued[0]},0,{self.total_alert_time_s[0] / 1e6}"
+        else:
+            # Multiple rows - output summed totals with "ALL" as row identifier
+            total_activations = sum(self.total_activations_per_row)
+            total_alerts = sum(self.alerts_issued)
+            total_alert_time_ms = sum(self.total_alert_time_s) / 1e6
+            if self.rfm_enabled:
+                total_rfms = sum(self.rfm_issued)
+                metrics = f"ALL,{total_activations},{total_alerts},{total_rfms},{total_alert_time_ms}"
+            else:
+                metrics = f"ALL,{total_activations},{total_alerts},0,{total_alert_time_ms}"
+        
+        return f"{input_params},{metrics}"
 
 
 def build_arg_parser():
@@ -282,8 +348,12 @@ def build_arg_parser():
     )
     p.add_argument("--runtime", type=str, default="128ms", help="Total simulation runtime. Default is 128ms.")
     p.add_argument(
-        "--rfmfreq", type=str, default="0",
-        help="RFM (Row Fresh Management) frequency (e.g., '32us', '64us'). Use '0' to disable RFM. Default is 0 (disabled)."
+        "--rfmfreqmin", type=str, default="0",
+        help="RFM (Row Fresh Management) window start time (e.g., '32us', '64us'). Use '0' to disable RFM. Default is 0 (disabled)."
+    )
+    p.add_argument(
+        "--rfmfreqmax", type=str, default="0",
+        help="RFM (Row Fresh Management) window end time (e.g., '48us', '80us'). Must be >= rfmfreqmin. Default is 0 (disabled)."
     )
     p.add_argument(
         "--trfcrfm", type=str, default="0",
@@ -303,10 +373,16 @@ def main(argv=None):
     try:
         trc_s = parse_time_to_seconds(args.trc)
         runtime_s = parse_time_to_seconds(args.runtime)
-        rfm_freq_s = parse_time_to_seconds(args.rfmfreq)
+        rfm_freq_min_s = parse_time_to_seconds(args.rfmfreqmin)
+        rfm_freq_max_s = parse_time_to_seconds(args.rfmfreqmax)
         trfcrfm_s = parse_time_to_seconds(args.trfcrfm)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
+        return 2
+
+    # Validate RFM frequency range
+    if rfm_freq_min_s > 0 and rfm_freq_max_s > 0 and rfm_freq_max_s < rfm_freq_min_s:
+        print(f"Error: rfmfreqmax ({args.rfmfreqmax}) must be >= rfmfreqmin ({args.rfmfreqmin})", file=sys.stderr)
         return 2
 
     sim = DRAMSimulator(
@@ -315,8 +391,15 @@ def main(argv=None):
         threshold=args.threshold,
         rfmabo=args.rfmabo,
         runtime_s=runtime_s,
-        rfm_freq_s=rfm_freq_s,
+        rfm_freq_min_s=rfm_freq_min_s,
+        rfm_freq_max_s=rfm_freq_max_s,
         trfcrfm_s=trfcrfm_s,
+        # Pass original string arguments for CSV output
+        trc_str=args.trc,
+        rfmfreqmin_str=args.rfmfreqmin,
+        rfmfreqmax_str=args.rfmfreqmax,
+        trfcrfm_str=args.trfcrfm,
+        runtime_str=args.runtime,
     )
     sim.run()
     if args.csv:
