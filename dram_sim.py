@@ -167,6 +167,9 @@ class DRAMSimulator:
         self.rfm_issued: List[int] = [0] * rows  # Track RFMs issued per row
         self.total_rfms: int = 0
         self.total_rfm_time_s: float = 0.0
+        
+        # Active rows tracking - rows are dropped permanently after RFM reset
+        self.active_rows: set[int] = set(range(rows))
 
     def _schedule_next_rfm_in_window(self):
         """Schedule the next RFM at a random time within the current window."""
@@ -190,6 +193,10 @@ class DRAMSimulator:
           - If it triggers an ALERT, consume alert duration immediately (GLOBAL STALL).
         """
         while True:
+            # Check if all rows have been dropped
+            if not self.active_rows:
+                break
+                
             # Check if it's time for RFM before next activation
             if self.time_s >= self.next_rfm_time_s and self.rfm_enabled:
                 # Issue RFM if we're within the window
@@ -204,13 +211,20 @@ class DRAMSimulator:
                 self.next_rfm_window_start_s += self.rfm_freq_min_s
                 self.next_rfm_window_end_s = self.next_rfm_window_start_s + (self.rfm_freq_max_s - self.rfm_freq_min_s)
                 self._schedule_next_rfm_in_window()
+            
+            # Check again after RFM - all rows may have been dropped
+            if not self.active_rows:
+                break
                 
             # Can we start an ACTIVATE within the runtime?
             if self.time_s + self.trc_s > self.runtime_s:
                 break
 
-            # ACTIVATE current row
-            row = self.row_index
+            # Find next active row (round robin, skipping dropped rows)
+            row = self._next_active_row()
+            if row is None:
+                break
+            
             self.counters[row] += 1  # Threshold checking counter
             self.total_activations_per_row[row] += 1  # Total activations counter
             self.total_activations += 1
@@ -230,31 +244,58 @@ class DRAMSimulator:
 
             # Next row (round robin)
             self.row_index = (self.row_index + 1) % self.rows
+    
+    def _next_active_row(self) -> int | None:
+        """Find the next active row starting from row_index. Returns None if no active rows."""
+        if not self.active_rows:
+            return None
+        # Start from current row_index and find next active row
+        for _ in range(self.rows):
+            if self.row_index in self.active_rows:
+                return self.row_index
+            self.row_index = (self.row_index + 1) % self.rows
+        return None
             
     def _issue_alert_rfms(self):
-        """Issue rfmabo number of RFMs targeting rows with highest counters during alert."""
-        # Get list of (counter_value, row_index) pairs for ALL rows, sorted by counter value (highest first)
-        all_rows = [(self.counters[r], r) for r in range(self.rows)]
-        all_rows.sort(reverse=True, key=lambda x: x[0])
+        """Issue rfmabo number of RFMs targeting active rows with highest counters during alert."""
+        if not self.active_rows:
+            return
+            
+        # Get list of (counter_value, row_index) pairs for ACTIVE rows only, sorted by counter value (highest first)
+        active_row_counters = [(self.counters[r], r) for r in self.active_rows]
+        active_row_counters.sort(reverse=True, key=lambda x: x[0])
         
-        # Always issue exactly rfmabo RFMs, regardless of counter values
+        # Issue up to rfmabo RFMs, targeting active rows only
         for i in range(self.rfmabo):
-            # Target rows in order of highest counters first, cycling through all rows if needed
-            target_row = all_rows[i % len(all_rows)][1]
-            self.counters[target_row] = 0  # Reset counter (no effect if already 0)
+            if not active_row_counters:
+                break
+            # Target rows in order of highest counters first, cycling through active rows if needed
+            target_row = active_row_counters[i % len(active_row_counters)][1]
+            self.counters[target_row] = 0  # Reset counter
             self.rfm_issued[target_row] += 1
             self.total_rfms += 1
+            # Drop the row permanently
+            self.active_rows.discard(target_row)
             
     def _issue_rfm(self):
-        """Issue RFM to the row closest to exceeding threshold."""
-        # Find row with highest counter value (closest to threshold)
-        max_counter = max(self.counters)
-        if max_counter > 0:  # Only issue RFM if there are activations to reset
-            # Find the first row with the maximum counter value
-            target_row = self.counters.index(max_counter)
+        """Issue RFM to the active row closest to exceeding threshold."""
+        if not self.active_rows:
+            return
+            
+        # Find active row with highest counter value (closest to threshold)
+        max_counter = -1
+        target_row = None
+        for r in self.active_rows:
+            if self.counters[r] > max_counter:
+                max_counter = self.counters[r]
+                target_row = r
+        
+        if target_row is not None and max_counter > 0:  # Only issue RFM if there are activations to reset
             self.counters[target_row] = 0
             self.rfm_issued[target_row] += 1
             self.total_rfms += 1
+            # Drop the row permanently
+            self.active_rows.discard(target_row)
             
             # Consume RFM time if specified and runtime allows
             if self.trfcrfm_s > 0:
